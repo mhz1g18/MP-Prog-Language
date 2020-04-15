@@ -10,10 +10,10 @@ import MPTokens
 %token
   eol     { TokenEOL }
   '->'   { TokenArrow }
-  integerType { TokenIntegerType }
+  IntegerT { TokenIntType }
   intStreamType { TokenIntStreamType }
-  stringType  { TokenStringType }
-  boolType    { TokenBoolType  }
+  BooleanType  { TokenBooleanType }
+  boolType    { TokenBoolVal  }
   unitType    { TokenUnitType }
   bool    { TokenBool $$}
   loop    { TokenLoop }
@@ -21,12 +21,12 @@ import MPTokens
   else    { TokenElse }
   print   { TokenPrint }
   return  { TokenReturn }
-  main    { TokenMainFun }
-  ';'     { TokenSemiColon }
+  main    { TokenMain }
+  ';'     { TokenSemiCol }
   ':'     { TokenColon }
   ','     { TokenComma }
   '='     { TokenEq }
-  '=='    { TokenBEq }
+  '=='    { TokenNotEq }
   '&&'    { TokenAnd }
   '||'    { TokenOr  }
   '+'     { TokenAdd }
@@ -35,7 +35,7 @@ import MPTokens
   '/'     { TokenDiv }
   '%'     { TokenMod }
   '!'     { TokenNot }
-  '<'     { TokenLessThan }
+  '<'     { TokenLess }
   '('     { TokenLParen }
   '['     { TokenLBracket }
   ')'     { TokenRParen }
@@ -46,7 +46,7 @@ import MPTokens
   int     { TokenInt $$}
   string  { TokenString $$ }
 
-%nonassoc integerType intStreamType stringType boolType bool loop print main return "'" ',' '(' '{' '[' ')' '}' ']' var int string
+%nonassoc IntegerT intStreamType BooleanType boolType bool loop print main return "'" ',' '(' '{' '[' ')' '}' ']' var int string
 %nonassoc eol
 %right '->'
 %right ';'
@@ -67,13 +67,13 @@ rev_list(p) : p { [$1] } | rev_list(p) p { $2 : $1 }
 ord_list(p) : rev_list(p) { reverse $1 }
 rev(xs) : xs { reverse $1 }
 -----------------------------------------------------------------------------
-Prog : MainMethod { Prog $1 [] }
-     | MainMethod FuncDecs { Prog $1 $2 }
+Program : MainMethod { Program $1 [] }
+     | MainMethod FunctionsDeclarations { Program $1 $2 }
 
 MainMethod : main unitType Block { MainMethod $3 } 
 
-FuncDecs :: { [FuncDec] }
-FuncDecs : ord_list(FuncDec) { $1 } 
+FunctionsDeclarations :: { [FunctionDeclaration] }
+FunctionsDeclarations : ord_list(FunctionDeclaration) { $1 } 
 
 Expr : Stream { IntStream $1 }
      | ArithExpr { Arith $1 }
@@ -83,7 +83,7 @@ Expr : Stream { IntStream $1 }
      | Type var { VarDec $1 $2 }
      | var '=' Expr { VarAssign $1 $3 }
      | Type var '=' Expr { VarDecAssign $1 $2 $4 }
-     | FuncApp { FuncAppT $1 }
+     | FunctionApplication { FunctionApplicationT $1 }
      | '(' Expr ')' { Bracket $2 }
      | var '[' Expr ']' '[' Expr ']' '=' Expr { IntStreamAssign $1 $3 $6 $9 }
 
@@ -92,14 +92,14 @@ Statement : Expr ';' { ExprStatement $1 }
           | loop '(' Expr ':' Expr ':' IncOrDec ')' Block { ForLoop $3 $5 $7 $9 }
           | return Expr ';' { Return $2 }
 
-FuncApp : print '(' Expr ')' { PrintFunc $3 }
-        | var unitType { FuncApp $1 [] } 
-        | var '(' ArgsList ')' { FuncApp $1 $3 }
+FunctionApplication : print '(' Expr ')' { PrintFunc $3 }
+        | var unitType { FunctionApplication $1 [] } 
+        | var '(' ArgsList ')' { FunctionApplication $1 $3 }
 
 FuncParamList :: { [(Type,String)] }
 FuncParamList : unitType { [] } | '(' ParamList ')' { $2 }
 
-FuncDec : Type var FuncParamList Block { FuncDec $2 $1 $3 $4 }
+FunctionDeclaration : Type var FuncParamList Block { FunctionDeclaration $2 $1 $3 $4 }
 
 -------------------------------------------------------------
 argsListRev :: { [Expr] }
@@ -141,9 +141,9 @@ BoolExpr : bool  { B $1 }
          | Expr '||' Expr { Or $1 $3  }
          | Expr '!'  Expr { Not $1 $3 }
 
-Type : integerType { IntegerType } 
-     | boolType { BooleanType }
-     | stringType { StringType }
+Type : IntegerT { IntegerT } 
+     | boolType { BooleanT }
+     | BooleanType { BooleanType }
      | intStreamType { StreamType }
      | unitType { UnitType }
      | Type '->' Type { FunctionType $1 $3 }
@@ -154,10 +154,10 @@ IncOrDec : '+' int { Increment $2 }  | '-' int { Decrement $2 }
 parseError :: [Token] -> a
 parseError xs = error $ "Parse error on : " ++ (show xs)
 
-parseString :: String -> Prog
+parseString :: String -> Program
 parseString = parseCalc . alexScanTokens
 
-data Prog = Prog MainMethod [FuncDec] deriving (Eq,Show)
+data Program = Program MainMethod [FunctionDeclaration] deriving (Eq,Show)
 
 data MainMethod = MainMethod [Statement] deriving (Eq,Show)
 
@@ -170,7 +170,7 @@ data Expr
      | VarDec Type String
      | VarAssign String Expr
      | VarDecAssign Type String Expr
-     | FuncAppT FuncApp
+     | FunctionApplicationT FunctionApplication
      | PrintExpr Expr 
      | Bracket Expr
      | IntStreamAssign String Expr Expr Expr -- variable_name, row_index, col_index, value
@@ -189,15 +189,15 @@ data Stream = Stream [[Int]] deriving (Eq,Show)
 
 data IntStreamRow = IntStreamRow [Int] deriving (Eq,Show)
 
-data FuncDec 
-     = FuncDec String Type [(Type,String)] [Statement] --Name OutputType ParamsList Block 
+data FunctionDeclaration 
+     = FunctionDeclaration String Type [(Type,String)] [Statement] --Name OutputType ParamsList Block 
      deriving (Eq,Show)
 
 data ParamList = ParamList [(Type,String)] deriving (Eq,Show)
 data FuncParamList = FuncParamList [(Type,String)] deriving (Eq,Show)
 
-data FuncApp 
-     = FuncApp String [Expr] -- Function name & ordered list of arguments 
+data FunctionApplication 
+     = FunctionApplication String [Expr] -- Function name & ordered list of arguments 
      | PrintFunc Expr 
      deriving (Eq,Show)
 
@@ -222,13 +222,14 @@ data BoolExpr
      deriving (Eq,Show)
     
 data Type 
-     = IntegerType 
-     | BooleanType 
-     | StringType 
-     | StreamType 
-     | UnitType
+     = IntegerT 
+     | BooleanT 
+     | StringT 
+     | StreamT 
+     | UnitT
      | FunctionType Type Type
      deriving (Eq,Show)
 
 data IncOrDec = Increment Int | Decrement Int deriving (Eq,Show)
 }
+

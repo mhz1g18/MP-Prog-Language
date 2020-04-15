@@ -7,6 +7,7 @@ $digit = 0-9
 $alpha = [a-zA-Z]
 $space = [\ \t\f\v]
 
+
 tokens :-
   \r\n           { \_ -> TokenEOL }
   \r             ;
@@ -14,10 +15,10 @@ tokens :-
   $space+        ; 
   \-\>           { \_ -> TokenArrow }
   \(\)           { \_ -> TokenUnitType }
-  integer        { \_ -> TokenIntegerType }
+  integer        { \_ -> TokenIntType }
   intStream      { \_ -> TokenIntStreamType }
   string         { \_ -> TokenStringType }
-  bool           { \_ -> TokenBoolType  }
+  bool           { \_ -> TokenBoolVal  }
   true           { \_ -> TokenBool True }
   false          { \_ -> TokenBool False }
   loop           { \_ -> TokenLoop }
@@ -25,13 +26,13 @@ tokens :-
   else           { \_ -> TokenElse }
   print          { \_ -> TokenPrint }
   return         { \_ -> TokenReturn }
-  main           { \_ -> TokenMainFun }
+  main           { \_ -> TokenMain }
   \"             { \_ -> TokenQuote }
-  \;             { \_ -> TokenSemiColon }
+  \;             { \_ -> TokenSemiCol }
   \:             { \_ -> TokenColon }
   \,             { \_ -> TokenComma }
   \=             { \_ -> TokenEq }
-  \=\=           { \_ -> TokenBEq }
+  \=\=           { \_ -> TokenNotEq }
   \|\|           { \_ -> TokenOr  }
   \&\&           { \_ -> TokenAnd }
   \+             { \_ -> TokenAdd }
@@ -39,7 +40,7 @@ tokens :-
   \*             { \_ -> TokenMul }
   \/             { \_ -> TokenDiv }
   \%             { \_ -> TokenMod }
-  \<             { \_ -> TokenLessThan }
+  \<             { \_ -> TokenLess }
   \!             { \_ -> TokenNot } 
   \(             { \_ -> TokenLParen }
   \[             { \_ -> TokenLBracket }
@@ -56,7 +57,7 @@ data Token =
   TokenEOL            |
   TokenArrow          | 
   TokenUnitType       | 
-  TokenIntegerType    |
+  TokenIntType    |
   TokenIntStreamType  |
   TokenStringType     |
   TokenBoolType       |
@@ -66,13 +67,13 @@ data Token =
   TokenElse           |
   TokenPrint          |
   TokenReturn         |
-  TokenMainFun        |
+  TokenMain        |
   TokenQuote          |
-  TokenSemiColon      |
+  TokenSemiCol      |
   TokenColon          |
   TokenComma          |
   TokenEq             |
-  TokenBEq            |
+  TokenNotEq            |
   TokenAdd            |
   TokenOr             |
   TokenAnd            |
@@ -80,7 +81,7 @@ data Token =
   TokenMul            |
   TokenDiv            |
   TokenMod            |
-  TokenLessThan       |
+  TokenLess       |
   TokenNot            |
   TokenLParen         |
   TokenLBracket       |
@@ -97,7 +98,7 @@ instance Show Token where
   show (TokenEOL) = "EOL"
   show (TokenArrow) = "->"
   show (TokenUnitType) = "()"
-  show (TokenIntegerType) = "integer"  
+  show (TokenIntType) = "integer"  
   show (TokenIntStreamType) = "intStream"
   show (TokenStringType) = "string"
   show (TokenBoolType) = "bool"   
@@ -107,13 +108,13 @@ instance Show Token where
   show (TokenElse) = "else"        
   show (TokenPrint) = "`print`"
   show (TokenReturn) = "return"
-  show (TokenMainFun) = "main"
+  show (TokenMain) = "main"
   show (TokenQuote) = "\"\""       
-  show (TokenSemiColon) = ";"     
+  show (TokenSemiCol) = ";"     
   show (TokenColon) = "`:`"      
   show (TokenComma) = "`,`"        
   show (TokenEq) = "`=`"         
-  show (TokenBEq) = "`==`"           
+  show (TokenNotEq) = "`==`"           
   show (TokenAdd) = "`+`"           
   show (TokenOr) = "`||`"               
   show (TokenAnd) = "`&&`"              
@@ -121,7 +122,7 @@ instance Show Token where
   show (TokenMul) = "`*`"               
   show (TokenDiv) = "`\\`"              
   show (TokenMod) = "`%`"              
-  show (TokenLessThan) = "`>`"        
+  show (TokenLess) = "`>`"        
   show (TokenNot) = "`!`"             
   show (TokenLParen) = "`(`"   
   show (TokenLBracket) = "`[`"   
