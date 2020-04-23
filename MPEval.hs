@@ -1,320 +1,293 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleContexts #-}
 module MPEval where
-  import MPGrammar
-  import System.Environment
-  import Control.Exception
-  import System.IO
+import MPTokens
+import MPGrammar
+import Control.Monad
+import Control.Monad.State
+import Control.Monad.Reader
+import Control.Monad.Identity
+import Data.Maybe
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.List
+
+data Value 
+     = IntVal Int
+     | IntStreamVal [[Int]]
+     | BoolVal Bool
+     | StringVal String
+     | UnitVal
+     deriving (Eq,Show)
+
+type LocalEnv = Map String Value
+type Env = Map FuncDec LocalEnv
+
+prog = parseCalc $ alexScanTokens "main() {integer a=4;}"
+stmts :: [Statement]
+stmts = [VarDecAssign IntegerType "intVar" (Arith (I 1)),VarDecAssign IntegerType "result" (Arith (I 0)),Return $ Arith (Add (Variable "intVar") (Variable "result"))]
+
+func_one, main_func :: FuncDec
+func_one = FuncDec "intFunc" IntegerType [] [VarDecAssign IntegerType "intVar" (Arith (I 0))]
+main_func = MainFunc [VarDecAssign BooleanType "boolVar" (Boolean (B False)), Return (Boolean (Or (Boolean (B True))(Variable "boolVar")))]
+
+
+exprs :: [Expr]
+exprs = [Arith $ Add (Arith $ Mul (Arith (I 3))(Arith (I 2))) (Arith (I $ -1))]
+initial_env = Map.empty
+
+
+updateLocalEnv :: Env -> FuncDec -> String -> Value -> Env
+updateLocalEnv env fun x v =
+ case (Map.lookup fun env) of
+   Nothing -> Map.insert fun (Map.insert x v Map.empty) env
+   Just e  -> case (Map.lookup x e) of
+               Nothing -> Map.insert fun (Map.insert x v e) env
+               Just v' -> Map.insert fun (Map.insert x v e) env
+
+lookupFuncDec :: String -> Env -> Maybe FuncDec -- Returns a FuncDec from a function name
+lookupFuncDec x env | length (Map.keys xs) /=1 = Nothing
+                    | otherwise = Just . head $ Map.keys xs
+                     where xs = Map.filterWithKey (\k _ -> funcDecPred x k) env
   
-  type Environment = [(String, Type, Expr)]
+funcDecPred :: String -> FuncDec -> Bool
+funcDecPred x (FuncDec y _ _ _) = x==y
+funcDecPred _ _ = False
 
-  typeOfList :: [Expr] -> Maybe Type -> Type
-  typeOfList [] Nothing = TypeEmpty
-  typeOfList [] (Just t) = t 
-  typeOfList (x:xs) Nothing = typeOfList xs (Just (typeOf x))
-  typeOfList (x:xs) (Just t) | t == typeOf x = typeOfList xs (Just t)
-                             | otherwise = error "[ERROR] Multiple data types in an array"
+interpretProg :: Prog -> [Env]
+interpretProg (Prog xs) = interpretFuncDec initial_env "main" main'
+  where (xs'@(main':_),_) = partition isMainFunc xs
 
-  typeOf :: Expr -> Type
-  typeOf (ExprInt _) = TypeInt
-  typeOf (ExprBool _) = TypeBool
-  typeOf (ExprString _) = TypeString
-  typeOf (ExprArrayAssign xs) = typeOfList xs Nothing
-  typeOf _ = error "[ERROR] Could not get type"
+interpretFuncDec :: Env -> String -> FuncDec -> [Env]
+interpretFuncDec env f func@(FuncDec _ _ _ xs) 
+  | func `notElem` (Map.keys env) = let env' = Map.insert func (Map.empty) env in map (\s -> interpretStmt env' f s) xs
+  | otherwise = map (\s -> interpretStmt env f s) xs
+interpretFuncDec env f func@(MainFunc xs)
+  | func `notElem` (Map.keys env) = let env' = Map.insert func (Map.empty) env in map (\s -> interpretStmt env' f s) xs
+  | otherwise = map (\s -> interpretStmt env f s) xs
 
-  prettyPrint :: Expr -> String
-  prettyPrint (ExprInt x) = show x
-  prettyPrint (ExprBool x) = show x
-  prettyPrint (ExprString x) = read $ "\"" ++ x ++ "\""
-  prettyPrint e = show e 
+interpretStmt :: Env -> String -> Statement -> Env 
+interpretStmt env f (VarDec t s) = env
+interpretStmt env f (VarAssign s e)
+   | isJust v && isJust func = updateLocalEnv env (fromJust func) s (fromJust v)
+    where v = interpretExpr env f e ; func = lookupFuncDec f env
+interpretStmt env f (VarDecAssign _ s e)
+   | isJust v && isJust func = updateLocalEnv env (fromJust func) s (fromJust v)
+    where v = interpretExpr env f e ; func = lookupFuncDec f env
+interpretStmt env f (Return e) = env
+interpretStmt env f (IfElse e (x:xs) (y:ys)) = undefined
+interpretStmt env _ _ = env
 
-  getFirstInput :: [[Int]] -> Int
-  getFirstInput [] = error "[ERROR] No input left"
-  getFirstInput xs = head (head xs)
-  
+interpretExpr :: Env -> String -> Expr -> Maybe Value
+interpretExpr env f (Variable x) = 
+ do
+  func <- lookupFuncDec f env
+  localEnv <- Map.lookup func env
+  Map.lookup x localEnv
+interpretExpr _ _ (IntStream xs) = return $ IntStreamVal xs
+interpretExpr _ _ (StringExpr s) = return $ StringVal s
+interpretExpr env f (FuncAppT (PrintFunc e)) = interpretExpr env f e >> return UnitVal
+interpretExpr env f (FuncAppT (FuncApp g xs)) = 
+ do
+  func <- lookupFuncDec g env -- Check if the function invoked is in the environment. (Substitute arguments into function body)
+  return UnitVal
+interpretExpr env f (StreamAssign s x y e) =
+  do
+   e' <- interpretExpr env f e
+   if isIntVal e' then return . IntVal . intValProj $ e' else Nothing                                            
+interpretExpr env f (Bracket e) = interpretExpr env f e
+interpretExpr env f (Arith x) =
+ case x of
+  I int -> return $ IntVal int
+  Add e e' -> interpretArithExpr env f "+"  (e,e')
+  Sub e e' -> interpretArithExpr env f "-"  (e,e')
+  Mul e e' -> interpretArithExpr env f "*"  (e,e')
+  Div e e' -> interpretArithExpr env f "\\" (e,e')
+  Mod e e' -> interpretArithExpr env f "%"  (e,e')
+interpretExpr env f expr@(Boolean x) =
+ case x of
+   B b -> return $ BoolVal b 
+   LessThan e e' -> interpretBoolExpr env f "<" (e,e')
+   Equality e e' -> interpretBoolExpr env f "==" (e,e')
+   And e e' -> interpretBoolExpr env f "&&" (e,e') 
+   Or e e'  -> interpretBoolExpr env f "||" (e,e')
+   Not e  -> do
+              v <- interpretExpr env f e
+              when (not $ isBoolVal v) Nothing
+              return . BoolVal . not . boolValProj $ v
+----------------------------------------------------------------------------
+interpretArithExpr :: Env -> String -> String -> (Expr,Expr) -> Maybe Value
+interpretArithExpr env f s (x,y) = 
+ do
+  v <- interpretExpr env f x
+  v'<- interpretExpr env f y
+  when (not $ isIntVal v && isIntVal v') Nothing
+  case s of
+    "+" -> return . IntVal $ (+) (intValProj v) (intValProj v')
+    "-" -> return . IntVal $ (-) (intValProj v) (intValProj v')
+    "*" -> return . IntVal $ (*) (intValProj v) (intValProj v')
+    "\\" -> do
+             when (intValProj v' == 0) Nothing -- Division by Zero
+             return . IntVal $ (div) (intValProj v) (intValProj v')
+    "%" -> return . IntVal $ (mod) (intValProj v) (intValProj v')
+    otherwise -> Nothing
+----------------------------------------------------------------------------
+interpretBoolExpr :: Env -> String -> String -> (Expr,Expr) -> Maybe Value
+interpretBoolExpr env f s (x,y) = 
+ do
+  v <- interpretExpr env f x
+  v'<- interpretExpr env f y
+  when (not $ isBoolVal v && isBoolVal v') Nothing
+  case s of
+    "<"  ->  return . BoolVal $ (<) (boolValProj v) (boolValProj v')
+    "==" ->  return . BoolVal $ (==) (boolValProj v) (boolValProj v')
+    "&&" ->  return . BoolVal $ (&&) (boolValProj v) (boolValProj v')
+    "||" ->  return . BoolVal $ (||) (boolValProj v) (boolValProj v')
+    otherwise -> Nothing
+----------------------------------------------------------------------------
+{-
+newtype Eval a = Eval (StateT Env (ReaderT Env Identity) a) deriving (Functor, Applicative,Monad, MonadState Env, MonadReader Env) 
 
-  getLineInput :: [[Int]] -> [Int]
-  getLineInput [] = []
-  getLineInput xs = head xs
-  
-  getInputAfterReadLine :: [[Int]] -> [[Int]]
-  getInputAfterReadLine xs = tail xs
+lookupVarVal :: FuncDec -> String -> Eval Value
+lookupVarVal f x = do
+  env <- ask
+  case (lookup f env) of
+    Nothing -> return UnitVal
+    Just e' -> case (lookup x e') of
+                Nothing -> return UnitVal
+                Just v' -> return v'
 
-  getInputAfterRead :: [[Int]] -> [[Int]]
-  getInputAfterRead xs | f == [] = (tail xs)
-                       | otherwise = f : (tail xs)
-                       where f = tail (head xs)
-  
-  convertIntListToExpr :: [Int] -> [Expr]
-  convertIntListToExpr [] = [] 
-  convertIntListToExpr (x:xs) = (ExprInt x) : convertIntListToExpr xs
+evalProg :: Prog -> Eval Value
+evalProg _ = undefined
 
-  addEnv :: Environment -> [Environment] -> [Environment]
-  addEnv e env = e : env
+evalFuncDec :: FuncDec -> String -> Eval Value
+evalFuncDec _ _ = undefined
 
-  checkIfNothing :: Expr -> Bool
-  checkIfNothing ExprNothing = True
-  checkIfNothing _ = False
+evalExpr :: Expr -> String -> Eval Value
+evalExpr _ _ = undefined
 
-  getValueBinding :: String -> [Environment] -> Expr
-  getValueBinding x [] = error ("[ERROR] Variable binding '" ++ x ++ "' not found")
-  getValueBinding x (e:env) | checkIfNothing currentFoundBinding = getValueBinding x env
-                            | otherwise = currentFoundBinding 
-                            where currentFoundBinding = getValueBindingInd x e
-  
-  getValueBindingInd :: String -> Environment -> Expr
-  getValueBindingInd x [] = ExprNothing 
-  getValueBindingInd x ((y,t,e):env) | x == y && isEmpty e == False = e
-                                     | x == y && isEmpty e = error ("[ERROR] Variable '" ++ x ++ "' has not been initialised")
-                                     | otherwise = getValueBindingInd x env
-  
-  addBinding :: [Environment] -> String -> Type -> Expr -> [Environment]
-  addBinding env x t e = ((x,t,e) : (head env)) : tail env
-  
-  getListValueBinding :: String -> Expr -> [Environment] -> Expr
-  getListValueBinding x index [] = error ("[ERROR] Value binding '" ++ x ++ "' not found!")
-  getListValueBinding x index (e:env) | checkIfNothing currentFoundBinding = getListValueBinding x index env
-                                      | otherwise = currentFoundBinding 
-                                      where currentFoundBinding = getListValueBindingInd x index e
+evalStmt :: Statement -> String -> Eval Value
+evalStmt _ _ = undefined
+---------------------------------------------------------------------------------------------------
+interpretStmts :: [Statement] -> [LocalEnv] -- List of environments after each statement is executed
+interpretStmts = (<$>) (\s -> interpretStmt initial_env s)
 
-  getListValueBindingInd :: String -> Expr -> Environment -> Expr
-  getListValueBindingInd x e [] = ExprNothing
-  getListValueBindingInd x (ExprInt index) ((y,t,e):env) | x == y && isArray e = (getExprList e) !! index
-                                                         | x == y && (isArray e) == False = error ("[ERROR] Variable '" ++ x ++ "' not a list")
-                                                         | otherwise = getListValueBindingInd x (ExprInt index) env
-  getListValueBindingInd x _ _ = error ("[ERROR] Index not an int")  
-                                                  
+interpretExprs :: [Expr] -> Maybe Value
+interpretExprs xs = do
+                     values <- mapM (\e -> interpretExpr initial_env e) xs
+                     return $ last values
+       
+interpretStmt :: LocalEnv -> Statement -> LocalEnv
+interpretStmt env (VarDec t s) = env
+interpretStmt env (VarAssign s e) 
+  | isJust $ interpretExpr env e = (s,v) : env
+   where v = fromJust $ interpretExpr env e 
+interpretStmt env (VarDecAssign _ s e) 
+  | isJust $ interpretExpr env e = (s,v) : env
+   where v = fromJust $ interpretExpr env e 
+interpretStmt env (Return e) = env
+interpretStmt env (IfElse e (x:xs) (y:ys)) =
+ case (interpretExpr env e) of
+   Just (BoolVal True) ->  let env' = interpretStmt env x in last $ map (\s -> interpretStmt env' s) xs 
+   Just (BoolVal False) -> let env' = interpretStmt env y in last $ map (\s -> interpretStmt env' s) ys
+   _ -> env
+interpretStmt env stmt@(ForLoop l b i xs) = interpretForLoop env stmt
 
-  updateValueBinding :: String -> Expr -> [Environment] -> [Environment]
-  updateValueBinding x ne [] = error ("[ERROR] Value binding '" ++ x ++ "' not found!")
-  updateValueBinding x ne (e:env) | snd lastEnvCheck == False = e : updateValueBinding x ne env
-                                  | otherwise = (fst lastEnvCheck) : env
-                                  where lastEnvCheck = updateValueBindingInd x ne e 
-  
-  updateValueBindingInd :: String -> Expr -> Environment -> (Environment, Bool)
-  updateValueBindingInd x ne [] = ([], False)
-  updateValueBindingInd x ne ((y,t,e):env) | x == y && isArray ne && isArray e && typeOf ne == t = ((x,t,ne) : env, True)
-                                           | x == y && (isArray ne) == False && (isArray e) == False && typeOf ne == t = ((x,t,ne) : env, True)
-                                           | x /= y = ((y,t,e) : (fst nextOne), snd nextOne) 
-                                           | (isArray ne) == False && isArray e = error ("[ERROR] '" ++ x ++ "': You cannot assign a single expression to a list")                             
-                                           | isArray ne && (isArray e) == False = error ("[ERROR] '" ++ x ++ "': You cannot assign an expression list to a variable")
-                                           | otherwise = error ("[ERROR] '" ++ x ++ "': You cannot assign a value of type '" ++ (show (typeOf ne)) ++ "' to a variable of type: '" ++ show t ++ "'")
-                                         where nextOne = updateValueBindingInd x ne env
+interpretForLoop :: LocalEnv -> Statement -> LocalEnv
+interpretForLoop env stmt@(ForLoop l b i xs)
+ | isJust (interpretExpr env b) && isBoolVal (fromJust (interpretExpr env b)) =
+   case l of
+     LoopVarAssign s e -> g s e
+     LoopVarDecAssign _ s e -> g s e 
+   where g x y = case (interpretExpr env y) of
+                  Nothing -> env
+                  Just intVal@(IntVal v) -> case (interpretExpr ((x,intVal) : env) b) of -- Interpret boolean in updated environment with variable initialised 
+                                             --Execute the list of statements in the updated environment (the variable is incremented/decremented)
+                                             Just (BoolVal True) -> interpretForLoop (last $ map (\s -> interpretStmt env' s) xs) stmt 
+                                             otherwise -> env
+                                            where env' = case i of
+                                                          Increment c -> (x, IntVal (v+c)) : env
+                                                          Decrement c -> (x, IntVal (v-c)) : env
+interpretForLoop env _ = env 
+   
+interpretExpr :: LocalEnv -> Expr -> Maybe Value
+interpretExpr env (Variable v) = lookup v env
+interpretExpr _   (IntStream xs) = return $ IntStreamVal xs
+interpretExpr _   (StringExpr s) = return $ StringVal s
+interpretExpr env (FuncAppT (PrintFunc e)) = interpretExpr env e >> return UnitVal
+--interpretExpr env (FuncAppT f) 
+interpretExpr env (Bracket e) = interpretExpr env e
+interpretExpr env (StreamAssign s x y e) =
+  do
+   e' <- interpretExpr env e
+   if isIntVal e' then return . IntVal . intValProj $ e' else Nothing
+interpretExpr env expr@(Arith x) =
+ case x of
+   I v -> return $ IntVal v
+   Add e e' -> interpretArithExpr env '+' (e,e')
+   Sub e e' -> interpretArithExpr env '-' (e,e')
+   Mul e e' -> interpretArithExpr env '*' (e,e')
+   Div e e' -> interpretArithExpr env '\\' (e,e')
+   Mod e e' -> interpretArithExpr env '%' (e,e')
+interpretExpr env expr@(Boolean x) =
+ case x of
+   B b -> return $ BoolVal b 
+   LessThan e e' -> interpretBoolExpr env '<' (e,e')
+   Equality e e' -> interpretBoolExpr env 'e' (e,e')
+   And e e' -> interpretBoolExpr env 'a' (e,e') 
+   Or e e'  -> interpretBoolExpr env 'o' (e,e')
+   Not e  -> do
+              v <- interpretExpr env e
+              when (not $ isBoolVal v) Nothing
+              return . BoolVal . not . boolValProj $ v
+              
 
-  updateListValueBinding :: String -> Expr -> Expr -> [Environment] -> [Environment]
-  updateListValueBinding x ne index [] = error ("[ERROR] List value update: Value binding '" ++ x ++ "' not found!")
-  updateListValueBinding x ne index (e:env) | snd lastEnvCheck == False = e : updateListValueBinding x ne index env
-                                            | otherwise = (fst lastEnvCheck) : env
-                                            where lastEnvCheck = updateListValueBindingInd x ne index e 
+interpretArithExpr :: LocalEnv -> Char -> (Expr,Expr) -> Maybe Value
+interpretArithExpr env c (x,y) = 
+ do
+  v <- interpretExpr env x
+  v'<- interpretExpr env y
+  when (not $ isIntVal v && isIntVal v') Nothing
+  case c of
+    '+' -> return . IntVal $ (+) (intValProj v) (intValProj v')
+    '-' -> return . IntVal $ (-) (intValProj v) (intValProj v')
+    '*' -> return . IntVal $ (*) (intValProj v) (intValProj v')
+    '\\' -> do
+             when (intValProj v' == 0) Nothing -- Division by Zero
+             return . IntVal $ (div) (intValProj v) (intValProj v')
+    '%' -> return . IntVal $ (mod) (intValProj v) (intValProj v')
+    otherwise -> Nothing
 
-  updateListValueBindingInd :: String -> Expr -> Expr -> Environment -> (Environment, Bool)
-  updateListValueBindingInd x ne index [] = ([], False)
-  updateListValueBindingInd x ne (ExprInt index) ((y,t,e): env) | x == y && (isArray ne) == False && isArray e && typeOf ne == t = ((x,t,ExprArrayAssign (replaceNth index ne (getExprList e))) : env, True)
-                                                              | x == y && (isArray ne) == False && (isArray e) == False = error ("[ERROR] '" ++ x ++ "': Variable is not a list!") 
-                                                              | x == y && isArray ne && isArray e = error ("[ERROR] '" ++ x ++ "': You cannot assign a list to a variable!") 
-                                                              | x /= y = ((y,t,e) : (fst nextOne), (snd nextOne))
-                                                              | otherwise = error ("[ERROR] '" ++ x ++ "': You cannot assign a value of type '" ++ (show (typeOf ne)) ++ "' to a member of a list of type: '" ++ show t ++ "'")
-                                                              where nextOne = updateListValueBindingInd x ne (ExprInt index) env
-  updateListValueBindingInd x ne _ _ = error ("[ERROR] index not an integer")  
+interpretBoolExpr :: LocalEnv -> Char -> (Expr,Expr) -> Maybe Value
+interpretBoolExpr env c (x,y) = 
+ do
+  v <- interpretExpr env x
+  v'<- interpretExpr env y
+  when (not $ isBoolVal v && isBoolVal v') Nothing
+  case c of
+    '<'  -> return . BoolVal $ (<) (boolValProj v) (boolValProj v')
+    'e' ->  return . BoolVal $ (==) (boolValProj v) (boolValProj v')
+    'a' ->  return . BoolVal $ (&&) (boolValProj v) (boolValProj v')
+    'o' ->  return . BoolVal $ (||) (boolValProj v) (boolValProj v')
+    otherwise -> Nothing
+-}
 
-  replaceNth :: Int -> a -> [a] -> [a]
-  replaceNth _ _ [] = error ("[ERROR] Index out of range!")
-  replaceNth n newVal (x:xs) | n == 0 = newVal:xs
-                             | otherwise = x:replaceNth (n-1) newVal xs
+isMainFunc :: FuncDec -> Bool
+isMainFunc (MainFunc _) = True
+isMainFunc _ = False
 
-  getExprList :: Expr -> [Expr]
-  getExprList (ExprArrayAssign x) = x
-  getExprList _ = []                                
+isIntVal :: Value -> Bool
+isIntVal (IntVal _) = True
+isIntVal _ = False
 
-  isArray :: Expr -> Bool
-  isArray (ExprArrayAssign _) = True
-  isArray _ = False
+intValProj :: Value -> Int
+intValProj (IntVal i) = i
+intValProj _ = error "Invalid proj"
 
-  getArrayLength :: Expr -> Int
-  getArrayLength (ExprArrayAssign e) = length e
-  getArrayLength _ = -1
+isBoolVal :: Value -> Bool
+isBoolVal (BoolVal _) = True
+isBoolVal _ = False
 
-  isEmpty :: Expr -> Bool
-  isEmpty ExprEmpty = True
-  isEmpty _ = False
-
-  isValueFree :: String -> [Environment] -> Bool
-  isValueFree x [] = True
-  isValueFree x (e:env) | lastEnvCheck = isValueFree x env
-                        | otherwise = False
-                        where lastEnvCheck = isValueFreeInd x e
-
-  isValueFreeInd :: String -> Environment -> Bool
-  isValueFreeInd x [] = True
-  isValueFreeInd x ((y,t,e):env) | x == y = False
-                               | otherwise = isValueFreeInd x env
-
-  isValue :: Expr -> Bool
-  isValue (ExprInt _) = True
-  isValue (ExprBool _) = True
-  isValue (ExprString _) = True
-  isValue _ = False
-
-
-  evaluateExprNot :: Expr -> Expr
-  evaluateExprNot (ExprBool x) = ExprBool (not x)
-  evaluateExprNot _ = error "EvaluateExprNot: Invalid type"
-
-  evaluateExprOp :: Expr -> Op -> Expr -> Expr
-  evaluateExprOp (ExprInt x1) Plus (ExprInt x2) = ExprInt (x1+x2)
-  evaluateExprOp (ExprInt x1) Minus (ExprInt x2) = ExprInt (x1-x2)
-  evaluateExprOp (ExprInt x1) Multiply (ExprInt x2) = ExprInt (x1*x2)
-  evaluateExprOp (ExprInt x1) Divide (ExprInt x2) = ExprInt (x1 `div` x2)
-  evaluateExprOp (ExprInt x1) Power (ExprInt x2) = ExprInt (x1 ^ x2)
-  evaluateExprOp (ExprString x1) Plus (ExprString x2) = ExprString (x1 ++ x2)
-  evaluateExprOp (ExprArrayAssign x1) Plus (ExprArrayAssign x2) = ExprArrayAssign (x1 ++ x2)
-  evaluateExprOp _ _ _ = error "EvaluateExprOp: Invalid type (Expected type INT or STRING/LIST { only concatenation works: '+'})"
-
-  evaluateExprComp :: Expr -> CompareOp -> Expr -> Expr
-  evaluateExprComp (ExprInt x1) GreaterThan (ExprInt x2) = ExprBool (x1 > x2)
-  evaluateExprComp (ExprInt x1) LessThan (ExprInt x2) = ExprBool (x1 < x2)
-  evaluateExprComp (ExprInt x1) GreaterOrEqualThan (ExprInt x2) = ExprBool (x1 >= x2)
-  evaluateExprComp (ExprInt x1) LessOrEqualThan (ExprInt x2) = ExprBool (x1 <= x2)
-  evaluateExprComp (ExprInt x1) Equals (ExprInt x2) = ExprBool (x1 == x2)
-
-
-  evaluateExprComp (ExprBool x1) And (ExprBool x2) = ExprBool (x1 && x2)
-  evaluateExprComp (ExprBool x1) Or (ExprBool x2) = ExprBool (x1 || x2)
-
-  evaluateExprComp (ExprString x1) GreaterThan (ExprString x2) = ExprBool (length x1 > length x2)
-  evaluateExprComp (ExprString x1) LessThan (ExprString x2) = ExprBool (length x1 < length x2)
-  evaluateExprComp (ExprString x1) GreaterOrEqualThan (ExprString x2) = ExprBool (length x1 >= length x2)
-  evaluateExprComp (ExprString x1) LessOrEqualThan (ExprString x2) = ExprBool (length x1 <= length x2)
-  evaluateExprComp (ExprString x1) Equals (ExprString x2) = ExprBool (x1 == x2)
-
-  evaluateExprComp _ _ _ = error "EvaluateExprComp: Cannot compare different types"
-
-  evaluateExprList :: [Expr] -> [[Int]] -> [Environment] -> ([Expr], [[Int]])
-  evaluateExprList [] input _ = ([], input)
-  evaluateExprList (e:es) input env = ((fst evaluatedExpr) : (fst evaluatedExprList), snd evaluatedExprList) 
-                                    where evaluatedExpr = evaluateExpr e input env
-                                          evaluatedExprList = evaluateExprList es (snd evaluatedExpr) env
-
-  evaluateExpr :: Expr -> [[Int]] -> [Environment] -> (Expr, [[Int]])
-  --evaluate expressions with operations (+,-,/,*,^)
-  evaluateExpr (ExprArrayAssign e) input env = (ExprArrayAssign (fst evaluatedExpr), snd evaluatedExpr)
-                                             where evaluatedExpr = evaluateExprList e input env
-
-  evaluateExpr (ExprOp (ExprIdent x1) p (ExprIdent x2)) input env = evaluateExpr (ExprOp (getValueBinding x1 env) p (getValueBinding x2 env)) input env
-  evaluateExpr (ExprOp x1 p x2) input env | isValue x1 && isValue x2 = (evaluateExprOp x1 p x2, input)
-                                          | otherwise = (evaluateExprOp (fst evaluatedExpr1) p (fst evaluatedExprComb), snd evaluatedExprComb)
-                                          where evaluatedExpr1 = evaluateExpr x1 input env
-                                                evaluatedExpr2 = evaluateExpr x2 input env 
-                                                evaluatedExprComb = evaluateExpr x2 (snd evaluatedExpr1) env  
-  --evaluate expressions with compare operations (<,>,<=,>=,==,and,or)
-  evaluateExpr (ExprCompareOp (ExprIdent x1) p (ExprIdent x2)) input env = evaluateExpr (ExprCompareOp (getValueBinding x1 env) p (getValueBinding x2 env)) input env
-  evaluateExpr (ExprCompareOp (ExprIdent x1) p x2) input env = evaluateExpr (ExprCompareOp (getValueBinding x1 env) p x2) input env
-  evaluateExpr (ExprCompareOp x1 p (ExprIdent x2)) input env = evaluateExpr (ExprCompareOp x1 p (getValueBinding x2 env)) input env
-  evaluateExpr (ExprCompareOp x1 p x2) input env | isValue x1 && isValue x2 = (evaluateExprComp x1 p x2, input)
-                                                 | otherwise = (evaluateExprComp (fst evaluatedExpr1) p (fst evaluatedExprComb), snd evaluatedExprComb)
-                                                 where evaluatedExpr1 = evaluateExpr x1 input env
-                                                       evaluatedExpr2 = evaluateExpr x2 input env 
-                                                       evaluatedExprComb = evaluateExpr x2 (snd evaluatedExpr1) env    
-  --evaluate not expressions
-  evaluateExpr (ExprNot (ExprIdent x1)) input env = evaluateExpr (ExprNot (getValueBinding x1 env)) input env
-  evaluateExpr (ExprNot x1) input env | isValue x1 = (evaluateExprNot x1, input)
-                                      | otherwise = (evaluateExprNot (fst evaluatedExpr), snd evaluatedExpr)
-                                      where evaluatedExpr = evaluateExpr x1 input env
-
-  --evaluate expressions surrounded by paranthesises
-  evaluateExpr (ExprExpr (ExprIdent x1)) input env = evaluateExpr (getValueBinding x1 env) input env
-  evaluateExpr (ExprExpr x1) input env = evaluateExpr x1 input env
-                                
-  evaluateExpr (ExprArrayValue i e) input env = (getListValueBinding i (fst evaluatedExpr) env, snd evaluatedExpr)
-                                              where evaluatedExpr = evaluateExpr e input env
-  evaluateExpr (ExprIdent i) input env = (getValueBinding i env, input)
-  evaluateExpr ExprRead input env = (ExprInt (getFirstInput input), getInputAfterRead input)
-  evaluateExpr ExprReadLine input env = (ExprArrayAssign (convertIntListToExpr (getLineInput input)), getInputAfterReadLine input)
-  
-  evaluateExpr (ExprLength e) input env | isArray (fst evaluatedExpr) = (ExprInt (getArrayLength (fst evaluatedExpr)), snd evaluatedExpr)
-                                        | otherwise = error ("[ERROR] not a list")
-                                        where evaluatedExpr = evaluateExpr e input env
-
-  evaluateExpr x input env | isValue x = (x, input)
-                           | otherwise = error ("Not implemented");
-  
-
-
-  checkIfBoolAndTrue :: Expr -> Bool
-  checkIfBoolAndTrue (ExprBool True) = True
-  checkIfBoolAndTrue (ExprBool False) = False
-  checkIfBoolAndTrue _ = error ("Couldn't match the given expression with the bool type!");
-
-  evaluateStatementPrint :: Statement -> [[Int]] -> [Environment] -> IO(([Environment],[[Int]]))
-  evaluateStatementPrint (StatementPrint e) input env = do let evaluatedExpr = evaluateExpr e input env
-                                                           putStr (prettyPrint (fst evaluatedExpr))
-                                                           return (env, snd evaluatedExpr)
-  
-  evaluateProgram :: Program -> [[Int]] -> IO([Environment])
-  evaluateProgram (Program ss) input = do evaluatedStatements <- evaluateStatementList ss input [[]]
-                                          return (fst evaluatedStatements)
-
-  evaluateStatementList :: [Statement] -> [[Int]] -> [Environment] -> IO(([Environment],[[Int]]))
-  evaluateStatementList [] input env = return (env, input)
-  evaluateStatementList (s:ss) input env = do newEnv <- evaluateStatement s input env
-                                              evaluateStatementList ss (snd newEnv) (fst newEnv)
-
-  evaluateStatement :: Statement -> [[Int]] -> [Environment] -> IO(([Environment], [[Int]]))
-  evaluateStatement (StatementVarDeclr (VarDeclrOnly t i)) input env = do if isValueFree i env 
-                                                                          then return (addBinding env i t ExprEmpty, input)
-                                                                          else error "Variable name is in use."
-
-  evaluateStatement (StatementVarDeclr (VarDeclrAssign t i e)) input env = do if isValueFree i env
-                                                                              then do let evaluatedExpr = evaluateExpr e input env
-                                                                                      if typeOf (fst evaluatedExpr) == t
-                                                                                      then do let binding = addBinding env i t (fst evaluatedExpr)
-                                                                                              return (binding, snd evaluatedExpr)
-                                                                                      else error ("'" ++ i ++ "': You cannot assign a value of type '" ++ (show (typeOf e)) ++ "' to a variable of type: '" ++ show t ++ "'")
-                                                                              else error "Variable name is in use."
-  
-  evaluateStatement (StatementArrayDeclr (ArrayDeclrOnly t i)) input env = do if isValueFree i env
-                                                                              then return (addBinding env i t (ExprArrayAssign []), input)
-                                                                              else error "Variable name is in use."
-  
-  evaluateStatement (StatementArrayDeclr (ArrayDeclrAssign t i e)) input env = do if isValueFree i env
-                                                                                  then do let evaluatedExpr = evaluateExpr e input env
-                                                                                          if typeOf (fst evaluatedExpr) == TypeEmpty || typeOf (fst evaluatedExpr) == t
-                                                                                          then do let evaluatedEnv = addBinding env i t (fst evaluatedExpr)
-                                                                                                  return (evaluatedEnv, snd evaluatedExpr)
-                                                                                          else error ("'" ++ i ++ "': You cannot assign a value of type '" ++ (show (typeOf e)) ++ "' to a list of type: '" ++ show t ++ "'")
-                                                                                  else error "Variable name is in use."
-
-  evaluateStatement (StatementArrayAssign i index e) input env = do let evaluatedExpr = evaluateExpr e input env
-                                                                    let evaluatedIndex = evaluateExpr index (snd evaluatedExpr) env
-                                                                    return ((updateListValueBinding i (fst evaluatedExpr) (fst evaluatedIndex) env), snd evaluatedIndex)
-
-  evaluateStatement (StatementAssign i e) input env = do let evaluatedExpr = evaluateExpr e input env
-                                                         return (updateValueBinding i (fst (evaluatedExpr)) env, snd (evaluatedExpr))
-  
-  evaluateStatement (StatementIf (ExprBool expr) s) input env = do if expr
-                                                                    then do sEval <- evaluateStatementList s input ([]:env)
-                                                                            return (tail (fst sEval), snd sEval)
-                                                                    else return (env, input)
-
-  evaluateStatement (StatementIf (ExprInt e) _ ) _ _ = error ("Couldn't match the given expression with the bool type!");
-  evaluateStatement (StatementIf (ExprString e) _ ) _ _  = error ("Couldn't match the given expression with the bool type!");
-
-  evaluateStatement (StatementIf e s) input env = let evaluatedExpr = evaluateExpr e input env in
-                                                  evaluateStatement (StatementIf (fst evaluatedExpr) s) (snd evaluatedExpr) env
-
-  evaluateStatement (StatementIfElse (ExprBool expr) s1 s2) input env = do if expr 
-                                                                           then do s1Eval <- evaluateStatementList s1 input ([]:env)
-                                                                                   return (tail (fst s1Eval), snd s1Eval)
-                                                                           else do s2Eval <- evaluateStatementList s2 input ([]:env)
-                                                                                   return (tail (fst s2Eval), snd s2Eval)
-  evaluateStatement (StatementIfElse (ExprInt e) _ _) _ _ = error ("Couldn't match the given expression with the bool type!");
-  evaluateStatement (StatementIfElse (ExprString e) _ _) _ _  = error ("Couldn't match the given expression with the bool type!");                                                         
-
-  evaluateStatement (StatementIfElse e s1 s2) input env = let evaluatedExpr = (evaluateExpr e input env) in
-                                                          evaluateStatement (StatementIfElse (fst evaluatedExpr) s1 s2) (snd evaluatedExpr) env
-
-  evaluateStatement (StatementWhile e s) input env = do let evaluatedExpr = evaluateExpr e input env
-                                                        if checkIfBoolAndTrue (fst evaluatedExpr)
-                                                        then do sEval <- evaluateStatementList s (snd evaluatedExpr) ([]:env)
-                                                                evaluateStatement (StatementWhile e s) (snd sEval) (tail (fst sEval)) 
-                                                        else return (env, snd evaluatedExpr)
-
-  evaluateStatement (StatementPrint e) input env = evaluateStatementPrint (StatementPrint e) input env
+boolValProj :: Value -> Bool
+boolValProj (BoolVal b) = b
